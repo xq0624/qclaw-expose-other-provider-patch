@@ -1,6 +1,6 @@
 param(
     [string]$InstallRoot = '',
-    [string]$ExpectedDisplayVersion = '0.2.10',
+    [string]$ExpectedDisplayVersion = '0.2.19',
     [switch]$AllowUnknownVersion,
     [switch]$DryRun,
     [switch]$Unpatch,
@@ -25,13 +25,44 @@ function Write-LegacyPatchResidueHint {
 }
 
 function Find-Bytes([byte[]]$haystack, [byte[]]$needle, [int]$startIndex = 0) {
-    for ($i = $startIndex; $i -le $haystack.Length - $needle.Length; $i++) {
-        $ok = $true
-        for ($j = 0; $j -lt $needle.Length; $j++) {
-            if ($haystack[$i + $j] -ne $needle[$j]) { $ok = $false; break }
-        }
-        if ($ok) { return $i }
+    if ($null -eq $haystack -or $null -eq $needle) {
+        return -1
     }
+
+    $haystackLength = $haystack.Length
+    $needleLength = $needle.Length
+    if ($needleLength -eq 0) {
+        return [Math]::Min([Math]::Max($startIndex, 0), $haystackLength)
+    }
+    if ($startIndex -lt 0) {
+        $startIndex = 0
+    }
+    if ($needleLength -gt $haystackLength -or $startIndex -gt ($haystackLength - $needleLength)) {
+        return -1
+    }
+
+    $lastNeedleIndex = $needleLength - 1
+    $skipTable = New-Object 'int[]' 256
+    for ($i = 0; $i -lt 256; $i++) {
+        $skipTable[$i] = $needleLength
+    }
+    for ($i = 0; $i -lt $lastNeedleIndex; $i++) {
+        $skipTable[[int]$needle[$i]] = $lastNeedleIndex - $i
+    }
+
+    $maxIndex = $haystackLength - $needleLength
+    $i = $startIndex
+    while ($i -le $maxIndex) {
+        $j = $lastNeedleIndex
+        while ($j -ge 0 -and $haystack[$i + $j] -eq $needle[$j]) {
+            $j--
+        }
+        if ($j -lt 0) {
+            return $i
+        }
+        $i += $skipTable[[int]$haystack[$i + $lastNeedleIndex]]
+    }
+
     return -1
 }
 
@@ -445,6 +476,243 @@ function New-SkillHubRegexFixedContent([psobject]$state) {
     $updated = $updated.Replace($skillHubRegexFixLegacySchemaPattern, $skillHubRegexFixPatchedSchemaPattern)
     $updated = $updated.Replace($skillHubRegexFixTransitionalSchemaPattern, $skillHubRegexFixPatchedSchemaPattern)
     return $updated
+}
+
+function Get-ObjectPropertyValue([object]$obj, [string]$name) {
+    if ($null -eq $obj) {
+        return $null
+    }
+    $property = $obj.PSObject.Properties[$name]
+    if ($property) {
+        return $property.Value
+    }
+    return $null
+}
+
+function Set-ObjectPropertyValue([object]$obj, [string]$name, [object]$value) {
+    if ($null -eq $obj) {
+        throw ('无法设置空对象属性：' + $name)
+    }
+    if ($obj.PSObject.Properties[$name]) {
+        $obj.PSObject.Properties[$name].Value = $value
+    } else {
+        Add-Member -InputObject $obj -NotePropertyName $name -NotePropertyValue $value -Force
+    }
+}
+
+function Get-NormalizedModelProviderBaseUrl([string]$baseUrl) {
+    if ([string]::IsNullOrWhiteSpace($baseUrl)) {
+        return $baseUrl
+    }
+
+    $normalized = $baseUrl.Trim()
+    $normalized = $normalized.TrimEnd('/')
+    if ($normalized -match '(?i)/v1$') {
+        $normalized = $normalized.Substring(0, $normalized.Length - 3)
+        $normalized = $normalized.TrimEnd('/')
+    }
+    return $normalized
+}
+
+function Resolve-ModelProviderCompatConfigFiles {
+    $results = @()
+    $seen = @{}
+    $qclawRoot = Join-Path $env:USERPROFILE '.qclaw'
+    $qclawRuntimeConfigPath = Join-Path $qclawRoot 'qclaw.json'
+    $openClawConfigPath = Join-Path $qclawRoot 'openclaw.json'
+
+    if (Test-Path -LiteralPath $qclawRuntimeConfigPath) {
+        try {
+            $qclawConfig = [System.IO.File]::ReadAllText($qclawRuntimeConfigPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+            $configuredPath = [string](Get-ObjectPropertyValue $qclawConfig 'configPath')
+            if (-not [string]::IsNullOrWhiteSpace($configuredPath)) {
+                $openClawConfigPath = $configuredPath
+            }
+        } catch {
+            Write-WarnMsg ('读取 qclaw.json 失败，将回退默认 openclaw.json：' + (Get-OneLineText $_.Exception.Message))
+        }
+    }
+
+    foreach ($item in @(
+        [pscustomobject]@{ FilePath = $openClawConfigPath; Format = 'OpenClawConfig' }
+    )) {
+        $key = ([System.IO.Path]::GetFullPath($item.FilePath)).ToLowerInvariant()
+        if (-not $seen.ContainsKey($key)) {
+            $seen[$key] = $true
+            $results += $item
+        }
+    }
+
+    $agentsRoot = Join-Path $qclawRoot 'agents'
+    if (Test-Path -LiteralPath $agentsRoot) {
+        $modelFiles = Get-ChildItem -LiteralPath $agentsRoot -Recurse -Filter 'models.json' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\agent\\models\.json$' }
+        foreach ($file in $modelFiles) {
+            $key = ([System.IO.Path]::GetFullPath($file.FullName)).ToLowerInvariant()
+            if (-not $seen.ContainsKey($key)) {
+                $seen[$key] = $true
+                $results += [pscustomobject]@{
+                    FilePath = $file.FullName
+                    Format = 'AgentModels'
+                }
+            }
+        }
+    }
+
+    return @($results)
+}
+
+function Get-ModelProviderCompatFixState {
+    $entries = @()
+    $filesFound = 0
+    $targetCount = 0
+    $requiresFix = $false
+
+    foreach ($fileInfo in Resolve-ModelProviderCompatConfigFiles) {
+        $entry = [ordered]@{
+            FilePath = $fileInfo.FilePath
+            Format = $fileInfo.Format
+            Exists = (Test-Path -LiteralPath $fileInfo.FilePath)
+            ParseOk = $false
+            TargetProviders = @()
+            Fixes = @()
+            FixedContent = $null
+            Error = ''
+        }
+
+        if (-not $entry.Exists) {
+            $entries += [pscustomobject]$entry
+            continue
+        }
+
+        $filesFound++
+        try {
+            $content = [System.IO.File]::ReadAllText($fileInfo.FilePath, [System.Text.Encoding]::UTF8)
+            $root = $content | ConvertFrom-Json
+            $providers = if ($fileInfo.Format -eq 'OpenClawConfig') {
+                $models = Get-ObjectPropertyValue $root 'models'
+                Get-ObjectPropertyValue $models 'providers'
+            } else {
+                Get-ObjectPropertyValue $root 'providers'
+            }
+
+            if ($null -eq $providers) {
+                $entry.ParseOk = $true
+                $entries += [pscustomobject]$entry
+                continue
+            }
+
+            foreach ($providerProperty in @($providers.PSObject.Properties)) {
+                $providerKey = [string]$providerProperty.Name
+                if ($providerKey -ne 'other' -and -not $providerKey.StartsWith('custom-')) {
+                    continue
+                }
+
+                $provider = $providerProperty.Value
+                if ($null -eq $provider) {
+                    continue
+                }
+
+                $targetCount++
+                $entry.TargetProviders += $providerKey
+
+                $api = [string](Get-ObjectPropertyValue $provider 'api')
+                if ($api -ne $modelProviderCompatApi) {
+                    Set-ObjectPropertyValue $provider 'api' $modelProviderCompatApi
+                    $entry.Fixes += ($providerKey + ':api')
+                }
+
+                $baseUrl = [string](Get-ObjectPropertyValue $provider 'baseUrl')
+                $normalizedBaseUrl = Get-NormalizedModelProviderBaseUrl $baseUrl
+                if ($baseUrl -ne $normalizedBaseUrl) {
+                    Set-ObjectPropertyValue $provider 'baseUrl' $normalizedBaseUrl
+                    $entry.Fixes += ($providerKey + ':baseUrl')
+                }
+
+                $headers = Get-ObjectPropertyValue $provider 'headers'
+                if ($null -eq $headers) {
+                    $headers = [pscustomobject]@{}
+                    Set-ObjectPropertyValue $provider 'headers' $headers
+                }
+                $userAgent = [string](Get-ObjectPropertyValue $headers 'User-Agent')
+                if ([string]::IsNullOrWhiteSpace($userAgent)) {
+                    Set-ObjectPropertyValue $headers 'User-Agent' $modelProviderCompatUserAgent
+                    $entry.Fixes += ($providerKey + ':headers.User-Agent')
+                }
+            }
+
+            $entry.ParseOk = $true
+            if ($entry.Fixes.Count -gt 0) {
+                $requiresFix = $true
+                $entry.FixedContent = ($root | ConvertTo-Json -Depth 100)
+            }
+        } catch {
+            $entry.Error = Get-OneLineText $_.Exception.Message
+        }
+
+        $entries += [pscustomobject]$entry
+    }
+
+    return [pscustomobject]@{
+        Files = @($entries)
+        FilesFound = $filesFound
+        TargetCount = $targetCount
+        RequiresFix = $requiresFix
+    }
+}
+
+function Get-ModelProviderCompatFixMode([psobject]$state) {
+    if ($state.RequiresFix) {
+        return 'PATCH'
+    }
+    if ($state.TargetCount -gt 0) {
+        return 'ALREADY_FIXED'
+    }
+    if ($state.FilesFound -gt 0) {
+        return 'NO_TARGET'
+    }
+    return 'MISSING'
+}
+
+function New-ModelProviderCompatFixPlan([psobject]$state, [string]$patchDirectory, [string]$installTag) {
+    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $index = 0
+    $plan = @()
+    foreach ($entry in @($state.Files)) {
+        if (-not $entry.FixedContent) {
+            continue
+        }
+        $index++
+        $backupPath = Join-Path $patchDirectory ('model-provider-config.' + $installTag + '.' + $timestamp + '.' + $index + '.bak')
+        $fixedCopyPath = Join-Path $patchDirectory ('model-provider-config.' + $installTag + '.' + $timestamp + '.' + $index + '.fixed')
+        [System.IO.File]::WriteAllText($fixedCopyPath, [string]$entry.FixedContent, [System.Text.UTF8Encoding]::new($false))
+        $plan += [pscustomobject]@{
+            FilePath = $entry.FilePath
+            BackupPath = $backupPath
+            FixedCopyPath = $fixedCopyPath
+            FixedContent = [string]$entry.FixedContent
+            Fixes = @($entry.Fixes)
+            TargetProviders = @($entry.TargetProviders)
+        }
+    }
+    return @($plan)
+}
+
+function Write-ModelProviderCompatFixPlan([object[]]$plan) {
+    foreach ($item in @($plan)) {
+        Copy-Item -LiteralPath $item.FilePath -Destination $item.BackupPath -Force
+        [System.IO.File]::WriteAllText($item.FilePath, [string]$item.FixedContent, [System.Text.UTF8Encoding]::new($false))
+    }
+}
+
+function Write-ModelProviderCompatSummary([string]$mode, [psobject]$state, [object[]]$plan = @()) {
+    Write-Host ('MODEL_PROVIDER_CONFIG_FIX=' + $mode)
+    Write-Host ('MODEL_PROVIDER_CONFIG_TARGETS=' + $state.TargetCount)
+    foreach ($item in @($plan)) {
+        Write-Host ('MODEL_PROVIDER_CONFIG_TARGET=' + $item.FilePath)
+        Write-Host ('MODEL_PROVIDER_CONFIG_FIXED_COPY=' + $item.FixedCopyPath)
+        Write-Host ('MODEL_PROVIDER_CONFIG_BACKUP=' + $item.BackupPath)
+    }
 }
 
 function New-ReplacedBytes([byte[]]$source, [int]$offset, [byte[]]$replacement) {
@@ -986,7 +1254,12 @@ $replaceText = $replaceTextCore + (' ' * $replacePaddingLength)
 $remoteOverrideSpecs = @(
     (New-ReplaceSpec 'QClaw 0.2.4 modelApi' 't.data&&t.data.length>0&&(Eo=t.data,hu(Eo,"modelApi"))' 't.data&&t.data.length<0&&(Eo=t.data,hu(Eo,"modelApi"))'),
     (New-ReplaceSpec 'QClaw 0.2.5 modelApi' 't.data&&t.data.length>0&&(Ko=t.data,Ru(Ko,"modelApi"))' 't.data&&t.data.length<0&&(Ko=t.data,Ru(Ko,"modelApi"))'),
-    (New-ReplaceSpec 'QClaw 0.2.10 modelApi' 't.data&&t.data.length>0&&(To=t.data,p0(To,"modelApi"))' 't.data&&t.data.length<0&&(To=t.data,p0(To,"modelApi"))')
+    (New-ReplaceSpec 'QClaw 0.2.10 modelApi' 't.data&&t.data.length>0&&(To=t.data,p0(To,"modelApi"))' 't.data&&t.data.length<0&&(To=t.data,p0(To,"modelApi"))'),
+    (New-ReplaceSpec 'QClaw 0.2.17 modelApi' 't.data&&t.data.length>0&&(tc=t.data,Lu(tc,"modelApi"))' 't.data&&t.data.length<0&&(tc=t.data,Lu(tc,"modelApi"))'),
+    (New-ReplaceSpec 'QClaw 0.2.19 modelApi' 't.data&&t.data.length>0&&(S2=t.data,Nb(S2,"modelApi"))' 't.data&&t.data.length<0&&(S2=t.data,Nb(S2,"modelApi"))')
+)
+$providerProtocolSpecs = @(
+    (New-ReplaceSpec 'QClaw other provider protocol' 'baseUrl:"https://ark.cn-beijing.volces.com/api/v3",api:"openai-completions",browserValidation:!0' 'baseUrl:"https://ark.cn-beijing.volces.com/api/v3",api:"anthropic-messages",browserValidation:!1')
 )
 $guardTexts = @(
     'if(f.value==="other"){if(!g.value)return void Xe.warning("请输入 Base URL");if(!h.value)return void Xe.warning("请输入模型名称")}else if(!m.value)return void Xe.warning("请选择或输入模型名称")}',
@@ -997,7 +1270,9 @@ $guardTexts = @(
     'if(f.value==="other"){if(!g.value)return void Ge.warning("请输入 Base URL");if(!h.value)return void Ge.warning("请输入模型名称")}else if(!m.value)return void Ge.warning("请选择或输入模型名称")}',
     'if(f.value==="other"){if(!v.value)return void qe.warning("请输入 Base URL");if(!g.value)return void qe.warning("请输入模型名称")}else if(!h.value)return void qe.warning("请选择或输入模型名称")}',
     'if(s.value==="custom"){if(!v.value)return void Je.warning("请选择模型厂商");if(v.value!==Sn){if(!m.value)return void Je.warning("请输入 API Key");if(v.value==="other"){if(!p.value)return void Je.warning("请输入 Base URL");if(!g.value)return void Je.warning("请输入模型名称")}else if(!h.value)return void Je.warning("请选择或输入模型名称")}}',
-    'if(d.value==="custom"){if(!f.value)return void lt.warning("请选择模型厂商");if(f.value!==yl){if(!v.value)return void lt.warning("请输入 API Key");if(f.value==="other"){if(!h.value)return void lt.warning("请输入 Base URL");if(!m.value)return void lt.warning("请输入模型名称")}else if(!g.value)return void lt.warning("请选择或输入模型名称")}}'
+    'if(d.value==="custom"){if(!f.value)return void lt.warning("请选择模型厂商");if(f.value!==yl){if(!v.value)return void lt.warning("请输入 API Key");if(f.value==="other"){if(!h.value)return void lt.warning("请输入 Base URL");if(!m.value)return void lt.warning("请输入模型名称")}else if(!g.value)return void lt.warning("请选择或输入模型名称")}}',
+    'if(p.value=v.value,p.value==="custom"){if(!m.value){Je.warning("请选择模型厂商");return}if(m.value!==bo){if(!h.value){Je.warning("请输入 API Key");return}if(i(m.value)){if(!B.value){Je.warning("请输入 Base URL");return}if(!_.value){Je.warning("请输入模型名称");return}}else if(!w.value){Je.warning("请选择或输入模型名称");return}}}',
+    'if(b.value=M.value,b.value==="custom"){if(!f.value){U0.warning("请选择模型厂商");return}if(f.value!==ma){if(!h.value){U0.warning("请输入 API Key");return}if(s(f.value)){if(!w.value){U0.warning("请输入 Base URL");return}if(!O.value){U0.warning("请输入模型名称");return}}else if(!v.value){U0.warning("请选择或输入模型名称");return}}}'
 )
 $skillHubRegexFixRelativePaths = @(
     'resources\openclaw\config\extensions\qclaw-plugin\packages\content-plugin\src\skillhub-installer.ts',
@@ -1011,6 +1286,8 @@ $skillHubRegexFixTransitionalSchemaPattern = 'pattern: "^[\\w\\-\\.]{1,128}$",'
 $skillHubRegexFixPatchedSchemaPattern = 'pattern: "^[A-Za-z0-9_.-]{1,128}$",'
 $sharpFallbackVersion = '0.34.5'
 $sharpInstallRegistry = 'https://registry.npmmirror.com'
+$modelProviderCompatUserAgent = 'claude-cli/1.0.0'
+$modelProviderCompatApi = 'anthropic-messages'
 
 $search = [System.Text.Encoding]::UTF8.GetBytes($searchText)
 $replace = [System.Text.Encoding]::UTF8.GetBytes($replaceText)
@@ -1149,6 +1426,9 @@ $skillHubFixMode = if (-not $skillHubFixState.Exists) {
     'NOOP'
 }
 
+$modelProviderConfigFixState = Get-ModelProviderCompatFixState
+$modelProviderConfigFixMode = Get-ModelProviderCompatFixMode $modelProviderConfigFixState
+
 [byte[]]$bytes = [System.IO.File]::ReadAllBytes($asarPath)
 $posSearch = Find-Bytes $bytes $search 0
 $posSearch2 = if ($posSearch -ge 0) { Find-Bytes $bytes $search ($posSearch + 1) } else { -1 }
@@ -1162,6 +1442,14 @@ $posRemoteReplace2 = $remoteOverrideState.ReplacePosition2
 $remoteOverrideFixMode = $remoteOverrideState.Mode
 $remoteOverrideSearch = $remoteOverrideState.SelectedSearchBytes
 $remoteOverrideReplace = $remoteOverrideState.SelectedReplaceBytes
+$providerProtocolState = Get-ReplaceSpecMatchState $bytes $providerProtocolSpecs
+$posProviderProtocolSearch = $providerProtocolState.SearchPosition
+$posProviderProtocolSearch2 = $providerProtocolState.SearchPosition2
+$posProviderProtocolReplace = $providerProtocolState.ReplacePosition
+$posProviderProtocolReplace2 = $providerProtocolState.ReplacePosition2
+$providerProtocolFixMode = $providerProtocolState.Mode
+$providerProtocolSearch = $providerProtocolState.SelectedSearchBytes
+$providerProtocolReplace = $providerProtocolState.SelectedReplaceBytes
 $guardMatch = Find-FirstTextMatch $bytes $guardTexts
 $posGuard = if ($guardMatch) { $guardMatch.Position } else { -1 }
 $currentRawHeaderHash = Get-AsarRawHeaderHash $bytes
@@ -1221,6 +1509,30 @@ if ($Status) {
         Write-Host ('REMOTE_REPLACE_OFFSET=' + $posRemoteReplace)
         exit 4
     }
+    if ($providerProtocolFixMode -eq 'AMBIGUOUS') {
+        Write-LegacyPatchResidueHint
+        Write-Host 'STATUS=AMBIGUOUS' -ForegroundColor Red
+        Write-Host ('INSTALL_ROOT=' + $resolvedRoot)
+        Write-Host ('APP_ASAR=' + $asarPath)
+        Write-Host ('EXE=' + $exePath)
+        Write-Host ('DETAIL=multiple_provider_protocol_hits')
+        if ($posProviderProtocolSearch -ge 0) { Write-Host ('PROVIDER_PROTOCOL_SEARCH_OFFSET_1=' + $posProviderProtocolSearch) }
+        if ($posProviderProtocolSearch2 -ge 0) { Write-Host ('PROVIDER_PROTOCOL_SEARCH_OFFSET_2=' + $posProviderProtocolSearch2) }
+        if ($posProviderProtocolReplace -ge 0) { Write-Host ('PROVIDER_PROTOCOL_REPLACE_OFFSET_1=' + $posProviderProtocolReplace) }
+        if ($posProviderProtocolReplace2 -ge 0) { Write-Host ('PROVIDER_PROTOCOL_REPLACE_OFFSET_2=' + $posProviderProtocolReplace2) }
+        exit 3
+    }
+    if ($providerProtocolFixMode -eq 'MIXED') {
+        Write-LegacyPatchResidueHint
+        Write-Host 'STATUS=UNKNOWN' -ForegroundColor Red
+        Write-Host ('INSTALL_ROOT=' + $resolvedRoot)
+        Write-Host ('APP_ASAR=' + $asarPath)
+        Write-Host ('EXE=' + $exePath)
+        Write-Host ('DETAIL=provider_protocol_mixed_state')
+        Write-Host ('PROVIDER_PROTOCOL_SEARCH_OFFSET=' + $posProviderProtocolSearch)
+        Write-Host ('PROVIDER_PROTOCOL_REPLACE_OFFSET=' + $posProviderProtocolReplace)
+        exit 4
+    }
     if ($currentEmbeddedHeaderHash -cne $currentRawHeaderHash) {
         Write-LegacyPatchResidueHint
         Write-Host 'STATUS=UNKNOWN' -ForegroundColor Red
@@ -1255,6 +1567,24 @@ if ($Status) {
             Write-Host ('TARGET_PATH=' + $replaceIntegrityState.Path)
             Write-Host ('ASAR_HEADER_SHA256=' + $currentRawHeaderHash)
             Write-Host ('REMOTE_OVERRIDE_FIX=' + $remoteOverrideFixMode)
+            Write-Host ('PROVIDER_PROTOCOL_FIX=' + $providerProtocolFixMode)
+            Write-ModelProviderCompatSummary $modelProviderConfigFixMode $modelProviderConfigFixState
+            Write-Host ('SHARP_FIX=' + $sharpFixMode)
+            Write-SharpStateSummary $sharpFixState
+            exit 0
+        }
+        if ($providerProtocolFixMode -eq 'PATCH') {
+            Write-Host 'STATUS=PATCHED_NEEDS_PROVIDER_PROTOCOL_FIX' -ForegroundColor Yellow
+            Write-Host ('INSTALL_ROOT=' + $resolvedRoot)
+            Write-Host ('APP_ASAR=' + $asarPath)
+            Write-Host ('EXE=' + $exePath)
+            Write-Host ('PATCH_OFFSET=' + $posReplace)
+            Write-Host ('PROVIDER_PROTOCOL_SEARCH_OFFSET=' + $posProviderProtocolSearch)
+            Write-Host ('TARGET_PATH=' + $replaceIntegrityState.Path)
+            Write-Host ('ASAR_HEADER_SHA256=' + $currentRawHeaderHash)
+            Write-Host ('REMOTE_OVERRIDE_FIX=' + $remoteOverrideFixMode)
+            Write-Host ('PROVIDER_PROTOCOL_FIX=' + $providerProtocolFixMode)
+            Write-ModelProviderCompatSummary $modelProviderConfigFixMode $modelProviderConfigFixState
             Write-Host ('SHARP_FIX=' + $sharpFixMode)
             Write-SharpStateSummary $sharpFixState
             exit 0
@@ -1267,6 +1597,8 @@ if ($Status) {
         Write-Host ('TARGET_PATH=' + $replaceIntegrityState.Path)
         Write-Host ('ASAR_HEADER_SHA256=' + $currentRawHeaderHash)
         Write-Host ('REMOTE_OVERRIDE_FIX=' + $remoteOverrideFixMode)
+        Write-Host ('PROVIDER_PROTOCOL_FIX=' + $providerProtocolFixMode)
+        Write-ModelProviderCompatSummary $modelProviderConfigFixMode $modelProviderConfigFixState
         Write-Host ('SHARP_FIX=' + $sharpFixMode)
         Write-SharpStateSummary $sharpFixState
         exit 0
@@ -1292,6 +1624,8 @@ if ($Status) {
         Write-Host ('TARGET_PATH=' + $searchIntegrityState.Path)
         Write-Host ('ASAR_HEADER_SHA256=' + $currentRawHeaderHash)
         Write-Host ('REMOTE_OVERRIDE_FIX=' + $remoteOverrideFixMode)
+        Write-Host ('PROVIDER_PROTOCOL_FIX=' + $providerProtocolFixMode)
+        Write-ModelProviderCompatSummary $modelProviderConfigFixMode $modelProviderConfigFixState
         Write-Host ('SHARP_FIX=' + $sharpFixMode)
         Write-SharpStateSummary $sharpFixState
         exit 0
@@ -1303,6 +1637,8 @@ if ($Status) {
     Write-Host ('EXE=' + $exePath)
     Write-Host ('DETAIL=mixed_or_feature_mismatch')
     Write-Host ('REMOTE_OVERRIDE_FIX=' + $remoteOverrideFixMode)
+    Write-Host ('PROVIDER_PROTOCOL_FIX=' + $providerProtocolFixMode)
+    Write-ModelProviderCompatSummary $modelProviderConfigFixMode $modelProviderConfigFixState
     exit 4
 }
 
@@ -1327,7 +1663,15 @@ if ($Unpatch) {
         Write-LegacyPatchResidueHint
         throw '安全校验失败：modelApi 远端覆盖特征状态混杂，拒绝反修补。'
     }
-    if ($posSearch -ge 0 -and $posReplace -lt 0 -and $remoteOverrideFixMode -ne 'ALREADY_FIXED') {
+    if ($providerProtocolFixMode -eq 'AMBIGUOUS') {
+        Write-LegacyPatchResidueHint
+        throw '安全校验失败：provider 协议特征出现多次，拒绝反修补。'
+    }
+    if ($providerProtocolFixMode -eq 'MIXED') {
+        Write-LegacyPatchResidueHint
+        throw '安全校验失败：provider 协议特征状态混杂，拒绝反修补。'
+    }
+    if ($posSearch -ge 0 -and $posReplace -lt 0 -and $remoteOverrideFixMode -ne 'ALREADY_FIXED' -and $providerProtocolFixMode -ne 'ALREADY_FIXED') {
         $searchIntegrityState = Get-AsarIntegrityStateForOffset $bytes $posSearch
         Write-Host 'ALREADY_UNPATCHED' -ForegroundColor Yellow
         Write-Host ('APP_ASAR=' + $asarPath)
@@ -1336,9 +1680,10 @@ if ($Unpatch) {
         Write-Host ('TARGET_PATH=' + $searchIntegrityState.Path)
         Write-Host ('ASAR_HEADER_SHA256=' + $currentRawHeaderHash)
         Write-Host ('REMOTE_OVERRIDE_FIX=' + $remoteOverrideFixMode)
+        Write-Host ('PROVIDER_PROTOCOL_FIX=' + $providerProtocolFixMode)
         exit 0
     }
-    if ($posReplace -lt 0 -and $remoteOverrideFixMode -ne 'ALREADY_FIXED') {
+    if ($posReplace -lt 0 -and $remoteOverrideFixMode -ne 'ALREADY_FIXED' -and $providerProtocolFixMode -ne 'ALREADY_FIXED') {
         Write-LegacyPatchResidueHint
         throw '特征校验失败：未找到已补丁 other 槽位与 remote override 修补，拒绝反修补。'
     }
@@ -1350,9 +1695,9 @@ if ($Unpatch) {
     $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $backup = Join-Path $patchDir ('app.asar.' + $installTag + '.' + $timestamp + '.bak')
     $unpatchedCopy = Join-Path $patchDir ('app.asar.' + $installTag + '.' + $timestamp + '.unpatched')
-    $unpatchTargetOffset = if ($posReplace -ge 0) { $posReplace } elseif ($posRemoteReplace -ge 0) { $posRemoteReplace } else { -1 }
+    $unpatchTargetOffset = if ($posReplace -ge 0) { $posReplace } elseif ($posRemoteReplace -ge 0) { $posRemoteReplace } elseif ($posProviderProtocolReplace -ge 0) { $posProviderProtocolReplace } else { -1 }
 
-    Write-Step ('命中偏移 replace=' + $posReplace + ' remoteReplace=' + $posRemoteReplace + ' guard=' + $posGuard)
+    Write-Step ('命中偏移 replace=' + $posReplace + ' remoteReplace=' + $posRemoteReplace + ' protocolReplace=' + $posProviderProtocolReplace + ' guard=' + $posGuard)
     Write-Step ('备份将保存到 ' + $backup)
     Write-Step ('unpatched 副本将保存到 ' + $unpatchedCopy)
 
@@ -1362,6 +1707,9 @@ if ($Unpatch) {
     }
     if ($posRemoteReplace -ge 0) {
         $unpatchedCandidate = New-ReplacedBytes $unpatchedCandidate $posRemoteReplace $remoteOverrideSearch
+    }
+    if ($posProviderProtocolReplace -ge 0) {
+        $unpatchedCandidate = New-ReplacedBytes $unpatchedCandidate $posProviderProtocolReplace $providerProtocolSearch
     }
     $unpatchedBuild = Update-AsarIntegrityForModifiedOffset $unpatchedCandidate $unpatchTargetOffset
     [byte[]]$unpatched = $unpatchedBuild.Bytes
@@ -1377,11 +1725,16 @@ if ($Unpatch) {
     $verifyReplacePos = Find-Bytes $verifyUnpatched $replace 0
     $verifyRemoteSearchPos = Find-Bytes $verifyUnpatched $remoteOverrideSearch 0
     $verifyRemoteReplacePos = Find-Bytes $verifyUnpatched $remoteOverrideReplace 0
+    $verifyProviderProtocolSearchPos = Find-Bytes $verifyUnpatched $providerProtocolSearch 0
+    $verifyProviderProtocolReplacePos = Find-Bytes $verifyUnpatched $providerProtocolReplace 0
     if ($posReplace -ge 0 -and ($verifySearchPos -lt 0 -or $verifyReplacePos -ge 0)) {
         throw 'unpatched 副本校验失败：未恢复到原始 doubao 特征。'
     }
     if ($posRemoteReplace -ge 0 -and ($verifyRemoteSearchPos -lt 0 -or $verifyRemoteReplacePos -ge 0)) {
         throw 'unpatched 副本校验失败：未恢复 modelApi 远端覆盖原始特征。'
+    }
+    if ($posProviderProtocolReplace -ge 0 -and ($verifyProviderProtocolSearchPos -lt 0 -or $verifyProviderProtocolReplacePos -ge 0)) {
+        throw 'unpatched 副本校验失败：未恢复 provider 协议原始特征。'
     }
     $verifyUnpatchedIntegrity = Get-AsarIntegrityStateForOffset $verifyUnpatched $unpatchTargetOffset
     if (-not $verifyUnpatchedIntegrity.IntegrityMatch) {
@@ -1397,6 +1750,7 @@ if ($Unpatch) {
         Write-Host ('WOULD_WRITE_HEADER_SHA256=' + $unpatchedBuild.HeaderHash)
         Write-Host ('TARGET_PATH=' + $unpatchedBuild.TargetPath)
         Write-Host ('REMOTE_OVERRIDE_FIX=' + $remoteOverrideFixMode)
+        Write-Host ('PROVIDER_PROTOCOL_FIX=' + $providerProtocolFixMode)
         exit 0
     }
 
@@ -1412,6 +1766,7 @@ if ($Unpatch) {
     Write-Host ('SHA256=' + $unpatchResult.AsarHash)
     Write-Host ('ASAR_HEADER_SHA256=' + $unpatchResult.EmbeddedHeaderHash)
     Write-Host ('REMOTE_OVERRIDE_FIX=' + $remoteOverrideFixMode)
+    Write-Host ('PROVIDER_PROTOCOL_FIX=' + $providerProtocolFixMode)
     exit 0
 }
 
@@ -1435,6 +1790,14 @@ if ($remoteOverrideFixMode -eq 'MIXED') {
     Write-LegacyPatchResidueHint
     throw '安全校验失败：modelApi 远端覆盖特征状态混杂，拒绝补丁。'
 }
+if ($providerProtocolFixMode -eq 'AMBIGUOUS') {
+    Write-LegacyPatchResidueHint
+    throw '安全校验失败：provider 协议特征出现多次，拒绝补丁。'
+}
+if ($providerProtocolFixMode -eq 'MIXED') {
+    Write-LegacyPatchResidueHint
+    throw '安全校验失败：provider 协议特征状态混杂，拒绝补丁。'
+}
 $patchMode = 'PATCH'
 $targetOffset = $posSearch
 
@@ -1445,16 +1808,24 @@ if ($posReplace -ge 0 -and $posSearch -lt 0) {
         if ($remoteOverrideFixMode -eq 'PATCH') {
             $pendingFixModes += 'REMOTE_OVERRIDE'
         }
+        if ($providerProtocolFixMode -eq 'PATCH') {
+            $pendingFixModes += 'PROVIDER_PROTOCOL'
+        }
         if ($skillHubFixMode -eq 'PATCH') {
             $pendingFixModes += 'SKILLHUB'
         }
         if ($sharpFixMode -eq 'PATCH') {
             $pendingFixModes += 'SHARP'
         }
+        if ($modelProviderConfigFixMode -eq 'PATCH') {
+            $pendingFixModes += 'MODEL_CONFIG'
+        }
         if ($pendingFixModes.Count -gt 0) {
             $patchMode = (($pendingFixModes -join '_AND_') + '_FIX_ONLY')
             if ($remoteOverrideFixMode -eq 'PATCH') {
                 $targetOffset = $posRemoteSearch
+            } elseif ($providerProtocolFixMode -eq 'PATCH') {
+                $targetOffset = $posProviderProtocolSearch
             } else {
                 $targetOffset = $posReplace
             }
@@ -1466,7 +1837,9 @@ if ($posReplace -ge 0 -and $posSearch -lt 0) {
             Write-Host ('TARGET_PATH=' + $patchedIntegrityState.Path)
             Write-Host ('ASAR_HEADER_SHA256=' + $currentRawHeaderHash)
             Write-Host ('REMOTE_OVERRIDE_FIX=' + $remoteOverrideFixMode)
+            Write-Host ('PROVIDER_PROTOCOL_FIX=' + $providerProtocolFixMode)
             Write-Host ('SKILLHUB_REGEX_FIX=' + $skillHubFixMode)
+            Write-ModelProviderCompatSummary $modelProviderConfigFixMode $modelProviderConfigFixState
             Write-Host ('SHARP_FIX=' + $sharpFixMode)
             Write-SharpStateSummary $sharpFixState
             exit 0
@@ -1475,6 +1848,8 @@ if ($posReplace -ge 0 -and $posSearch -lt 0) {
         $patchMode = 'REPAIR_PATCHED'
         if ($remoteOverrideFixMode -eq 'PATCH') {
             $targetOffset = $posRemoteSearch
+        } elseif ($providerProtocolFixMode -eq 'PATCH') {
+            $targetOffset = $posProviderProtocolSearch
         } else {
             $targetOffset = $posReplace
         }
@@ -1517,13 +1892,21 @@ if ($skillHubFixMode -eq 'PATCH') {
     }
 }
 
-if ($patchMode -like '*FIX_ONLY' -and $patchMode -notlike '*REMOTE_OVERRIDE*') {
+$modelProviderConfigFixPlan = @()
+if ($modelProviderConfigFixMode -eq 'PATCH') {
+    $modelProviderConfigFixPlan = New-ModelProviderCompatFixPlan $modelProviderConfigFixState $patchDir $installTag
+}
+
+if ($patchMode -like '*FIX_ONLY' -and $patchMode -notlike '*REMOTE_OVERRIDE*' -and $patchMode -notlike '*PROVIDER_PROTOCOL*') {
     $fixOnlyLabels = @()
     if ($patchMode -like '*SKILLHUB*') {
         $fixOnlyLabels += 'skillhub-installer regex'
     }
     if ($patchMode -like '*SHARP*') {
         $fixOnlyLabels += 'sharp 依赖'
+    }
+    if ($patchMode -like '*MODEL_CONFIG*') {
+        $fixOnlyLabels += '模型 provider 配置'
     }
     Write-Step ('检测到 app.asar 已补丁，将单独修复 ' + (($fixOnlyLabels | Where-Object { $_ }) -join ' 与 '))
     if ($skillHubFixMode -eq 'PATCH') {
@@ -1532,6 +1915,13 @@ if ($patchMode -like '*FIX_ONLY' -and $patchMode -notlike '*REMOTE_OVERRIDE*') {
     }
     if ($sharpFixMode -eq 'PATCH') {
         Write-Step ('sharp 将修复到 ' + $sharpFixState.TargetVersion + ' @ ' + $sharpFixState.OpenClawRoot)
+    }
+    if ($modelProviderConfigFixMode -eq 'PATCH') {
+        foreach ($configFix in @($modelProviderConfigFixPlan)) {
+            Write-Step ('provider 配置将修复 ' + $configFix.FilePath)
+            Write-Step ('provider 配置备份将保存到 ' + $configFix.BackupPath)
+            Write-Step ('provider 配置 fixed 副本将保存到 ' + $configFix.FixedCopyPath)
+        }
     }
 
     if ($DryRun) {
@@ -1543,6 +1933,8 @@ if ($patchMode -like '*FIX_ONLY' -and $patchMode -notlike '*REMOTE_OVERRIDE*') {
             Write-Host ('SKILLHUB_WOULD_BACKUP_TO=' + $skillHubFixBackup)
         }
         Write-Host ('REMOTE_OVERRIDE_FIX=' + $remoteOverrideFixMode)
+        Write-Host ('PROVIDER_PROTOCOL_FIX=' + $providerProtocolFixMode)
+        Write-ModelProviderCompatSummary $modelProviderConfigFixMode $modelProviderConfigFixState $modelProviderConfigFixPlan
         Write-Host ('SHARP_FIX=' + $sharpFixMode)
         Write-SharpStateSummary $sharpFixState
         Write-Host ('MODE=' + $patchMode)
@@ -1566,6 +1958,10 @@ if ($patchMode -like '*FIX_ONLY' -and $patchMode -notlike '*REMOTE_OVERRIDE*') {
         $sharpFixState = Invoke-SharpRepair $sharpFixState
         $sharpFixMode = 'ALREADY_OK'
     }
+    if ($modelProviderConfigFixMode -eq 'PATCH') {
+        Write-ModelProviderCompatFixPlan $modelProviderConfigFixPlan
+        $modelProviderConfigFixMode = 'ALREADY_FIXED'
+    }
 
     Write-Host 'PATCH_OK' -ForegroundColor Green
     if ($skillHubFixMode -eq 'PATCH') {
@@ -1574,6 +1970,8 @@ if ($patchMode -like '*FIX_ONLY' -and $patchMode -notlike '*REMOTE_OVERRIDE*') {
         Write-Host ('SKILLHUB_FIXED_COPY=' + $skillHubFixFixedCopy)
     }
     Write-Host ('REMOTE_OVERRIDE_FIX=' + $remoteOverrideFixMode)
+    Write-Host ('PROVIDER_PROTOCOL_FIX=' + $providerProtocolFixMode)
+    Write-ModelProviderCompatSummary $modelProviderConfigFixMode $modelProviderConfigFixState $modelProviderConfigFixPlan
     Write-Host ('SHARP_FIX=' + $sharpFixMode)
     Write-SharpStateSummary $sharpFixState
     Write-Host ('MODE=' + $patchMode)
@@ -1601,6 +1999,9 @@ if ($patchMode -eq 'PATCH') {
 if ($remoteOverrideFixMode -eq 'PATCH') {
     $patchedCandidate = New-ReplacedBytes $patchedCandidate $posRemoteSearch $remoteOverrideReplace
 }
+if ($providerProtocolFixMode -eq 'PATCH') {
+    $patchedCandidate = New-ReplacedBytes $patchedCandidate $posProviderProtocolSearch $providerProtocolReplace
+}
 $patchedBuild = Update-AsarIntegrityForModifiedOffset $patchedCandidate $targetOffset
 
 [byte[]]$patched = $patchedBuild.Bytes
@@ -1615,11 +2016,16 @@ $verifyPos = Find-Bytes $verifyPatched $replace 0
 $verifySearchPos = Find-Bytes $verifyPatched $search 0
 $verifyRemoteSearchPos = Find-Bytes $verifyPatched $remoteOverrideSearch 0
 $verifyRemoteReplacePos = Find-Bytes $verifyPatched $remoteOverrideReplace 0
+$verifyProviderProtocolSearchPos = Find-Bytes $verifyPatched $providerProtocolSearch 0
+$verifyProviderProtocolReplacePos = Find-Bytes $verifyPatched $providerProtocolReplace 0
 if ($verifyPos -lt 0 -or $verifySearchPos -ge 0) {
     throw 'patched 副本校验失败：未写入唯一目标特征。'
 }
 if ($remoteOverrideFixMode -eq 'PATCH' -and ($verifyRemoteReplacePos -lt 0 -or $verifyRemoteSearchPos -ge 0)) {
     throw 'patched 副本校验失败：未禁用 modelApi 远端覆盖。'
+}
+if ($providerProtocolFixMode -eq 'PATCH' -and ($verifyProviderProtocolReplacePos -lt 0 -or $verifyProviderProtocolSearchPos -ge 0)) {
+    throw 'patched 副本校验失败：未写入 provider 协议兼容修补。'
 }
 $verifyPatchedIntegrity = Get-AsarIntegrityStateForOffset $verifyPatched $targetOffset
 if (-not $verifyPatchedIntegrity.IntegrityMatch) {
@@ -1640,7 +2046,9 @@ if ($DryRun) {
         Write-Host ('SKILLHUB_WOULD_BACKUP_TO=' + $skillHubFixBackup)
     }
     Write-Host ('REMOTE_OVERRIDE_FIX=' + $remoteOverrideFixMode)
+    Write-Host ('PROVIDER_PROTOCOL_FIX=' + $providerProtocolFixMode)
     Write-Host ('SKILLHUB_REGEX_FIX=' + $skillHubFixMode)
+    Write-ModelProviderCompatSummary $modelProviderConfigFixMode $modelProviderConfigFixState $modelProviderConfigFixPlan
     Write-Host ('SHARP_FIX=' + $sharpFixMode)
     Write-SharpStateSummary $sharpFixState
     Write-Host ('MODE=' + $patchMode)
@@ -1664,6 +2072,10 @@ if ($sharpFixMode -eq 'PATCH') {
     $sharpFixState = Invoke-SharpRepair $sharpFixState
     $sharpFixMode = 'ALREADY_OK'
 }
+if ($modelProviderConfigFixMode -eq 'PATCH') {
+    Write-ModelProviderCompatFixPlan $modelProviderConfigFixPlan
+    $modelProviderConfigFixMode = 'ALREADY_FIXED'
+}
 Copy-Item -LiteralPath $asarPath -Destination $backup -Force
 $patchResult = Write-AsarAndSyncEmbeddedIntegrity $asarPath $exePath $patched $patchedBuild.HeaderHash $bytes $currentRawHeaderHash '补丁'
 
@@ -1680,7 +2092,9 @@ if ($skillHubFixMode -eq 'PATCH') {
     Write-Host ('SKILLHUB_FIXED_COPY=' + $skillHubFixFixedCopy)
 }
 Write-Host ('REMOTE_OVERRIDE_FIX=' + $remoteOverrideFixMode)
+Write-Host ('PROVIDER_PROTOCOL_FIX=' + $providerProtocolFixMode)
 Write-Host ('SKILLHUB_REGEX_FIX=' + $skillHubFixMode)
+Write-ModelProviderCompatSummary $modelProviderConfigFixMode $modelProviderConfigFixState $modelProviderConfigFixPlan
 Write-Host ('SHARP_FIX=' + $sharpFixMode)
 Write-SharpStateSummary $sharpFixState
 Write-Host ('MODE=' + $patchMode)

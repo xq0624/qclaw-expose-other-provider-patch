@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.2.9 - 适配 QClaw 0.2.19 与 Linux.do 中转站配置
+
+### 更新摘要
+- 默认目标版本从 `QClaw 0.2.10` 更新为 `QClaw 0.2.19`
+- 新增 `QClaw 0.2.17 / 0.2.19` 的 `other guard` 与 `modelApi` 远端覆盖特征
+- 新增 `other` 静态槽位协议修补：`openai-completions -> anthropic-messages`，并将 `browserValidation:!0 -> !1`
+- 新增当前用户 provider 配置修补：同步 `~\.qclaw\openclaw.json` 与 `~\.qclaw\agents\*\agent\models.json` 中的 `other/custom-*` provider，补齐 `api=anthropic-messages`、去除 Base URL 末尾 `/v1`、添加 `headers.User-Agent`
+- 将底层字节搜索替换为 Boyer-Moore-Horspool，避免新版 115MB `app.asar` 下状态探测过慢
+- 同步更新 `README.md` 与 `AGENTS.md` 的适用范围、状态输出与注意事项
+
+### 实机验证
+- 实测安装目录：`D:\Program Files\QClaw`
+- 实测目标版本：`QClaw 0.2.19`
+- 适配前半补丁状态：`STATUS=PATCHED_NEEDS_PROVIDER_PROTOCOL_FIX`
+- 主脚本 `-DryRun`：`DRY_RUN_OK`，`MODE=PROVIDER_PROTOCOL_AND_MODEL_CONFIG_FIX_ONLY`
+- 管理员正式执行：`PATCH_OK`
+- 补丁后复核：`STATUS=PATCHED_OR_OPEN`
+- 关键状态：`REMOTE_OVERRIDE_FIX=ALREADY_FIXED`、`PROVIDER_PROTOCOL_FIX=ALREADY_FIXED`、`MODEL_PROVIDER_CONFIG_FIX=ALREADY_FIXED`、`SHARP_STATE=OK`
+
+### 兼容性说明
+- 本次适配参考 Linux.do 帖子 `https://linux.do/t/topic/1667136`：`other` provider 在 OpenClaw/QClaw 链路下更适合使用 `anthropic-messages`、Base URL 不带 `/v1`，且部分中转站需要显式 `User-Agent`
+- `0.2.19` 的 `modelApi` 覆盖变量名为 `S2/Nb`，`other guard` 使用 `U0.warning + s(f.value)` 压缩结构
+- `QClaw 0.2.19` 仍未包含 `skillhub-installer.ts`，脚本自动跳过 `skillhub_install` regex 热修补
+
 ## v0.2.8 - 适配 QClaw 0.2.10 并完成实机验证
 
 ### 更新摘要
