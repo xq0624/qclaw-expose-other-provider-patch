@@ -1,6 +1,6 @@
 param(
     [string]$InstallRoot = '',
-    [string]$ExpectedDisplayVersion = '0.2.19',
+    [string]$ExpectedDisplayVersion = '0.2.24',
     [switch]$AllowUnknownVersion,
     [switch]$DryRun,
     [switch]$Unpatch,
@@ -1256,7 +1256,8 @@ $remoteOverrideSpecs = @(
     (New-ReplaceSpec 'QClaw 0.2.5 modelApi' 't.data&&t.data.length>0&&(Ko=t.data,Ru(Ko,"modelApi"))' 't.data&&t.data.length<0&&(Ko=t.data,Ru(Ko,"modelApi"))'),
     (New-ReplaceSpec 'QClaw 0.2.10 modelApi' 't.data&&t.data.length>0&&(To=t.data,p0(To,"modelApi"))' 't.data&&t.data.length<0&&(To=t.data,p0(To,"modelApi"))'),
     (New-ReplaceSpec 'QClaw 0.2.17 modelApi' 't.data&&t.data.length>0&&(tc=t.data,Lu(tc,"modelApi"))' 't.data&&t.data.length<0&&(tc=t.data,Lu(tc,"modelApi"))'),
-    (New-ReplaceSpec 'QClaw 0.2.19 modelApi' 't.data&&t.data.length>0&&(S2=t.data,Nb(S2,"modelApi"))' 't.data&&t.data.length<0&&(S2=t.data,Nb(S2,"modelApi"))')
+    (New-ReplaceSpec 'QClaw 0.2.19 modelApi' 't.data&&t.data.length>0&&(S2=t.data,Nb(S2,"modelApi"))' 't.data&&t.data.length<0&&(S2=t.data,Nb(S2,"modelApi"))'),
+    (New-ReplaceSpec 'QClaw 0.2.24 modelApi' 't.data&&t.data.length>0&&(j0=t.data,e1(j0,"modelApi"))' 't.data&&t.data.length<0&&(j0=t.data,e1(j0,"modelApi"))')
 )
 $providerProtocolSpecs = @(
     (New-ReplaceSpec 'QClaw other provider protocol' 'baseUrl:"https://ark.cn-beijing.volces.com/api/v3",api:"openai-completions",browserValidation:!0' 'baseUrl:"https://ark.cn-beijing.volces.com/api/v3",api:"anthropic-messages",browserValidation:!1')
@@ -1272,7 +1273,8 @@ $guardTexts = @(
     'if(s.value==="custom"){if(!v.value)return void Je.warning("请选择模型厂商");if(v.value!==Sn){if(!m.value)return void Je.warning("请输入 API Key");if(v.value==="other"){if(!p.value)return void Je.warning("请输入 Base URL");if(!g.value)return void Je.warning("请输入模型名称")}else if(!h.value)return void Je.warning("请选择或输入模型名称")}}',
     'if(d.value==="custom"){if(!f.value)return void lt.warning("请选择模型厂商");if(f.value!==yl){if(!v.value)return void lt.warning("请输入 API Key");if(f.value==="other"){if(!h.value)return void lt.warning("请输入 Base URL");if(!m.value)return void lt.warning("请输入模型名称")}else if(!g.value)return void lt.warning("请选择或输入模型名称")}}',
     'if(p.value=v.value,p.value==="custom"){if(!m.value){Je.warning("请选择模型厂商");return}if(m.value!==bo){if(!h.value){Je.warning("请输入 API Key");return}if(i(m.value)){if(!B.value){Je.warning("请输入 Base URL");return}if(!_.value){Je.warning("请输入模型名称");return}}else if(!w.value){Je.warning("请选择或输入模型名称");return}}}',
-    'if(b.value=M.value,b.value==="custom"){if(!f.value){U0.warning("请选择模型厂商");return}if(f.value!==ma){if(!h.value){U0.warning("请输入 API Key");return}if(s(f.value)){if(!w.value){U0.warning("请输入 Base URL");return}if(!O.value){U0.warning("请输入模型名称");return}}else if(!v.value){U0.warning("请选择或输入模型名称");return}}}'
+    'if(b.value=M.value,b.value==="custom"){if(!f.value){U0.warning("请选择模型厂商");return}if(f.value!==ma){if(!h.value){U0.warning("请输入 API Key");return}if(s(f.value)){if(!w.value){U0.warning("请输入 Base URL");return}if(!O.value){U0.warning("请输入模型名称");return}}else if(!v.value){U0.warning("请选择或输入模型名称");return}}}',
+    'if(y.value=m.value,y.value==="custom"){if(!g.value){Ue.warning("请选择模型厂商");return}if(g.value!==rl){if(!C.value){Ue.warning("请输入 API Key");return}if(i(g.value)){if(!x.value){Ue.warning("请输入 Base URL");return}if(!w.value){Ue.warning("请输入模型名称");return}}else if(!k.value){Ue.warning("请选择或输入模型名称");return}}}'
 )
 $skillHubRegexFixRelativePaths = @(
     'resources\openclaw\config\extensions\qclaw-plugin\packages\content-plugin\src\skillhub-installer.ts',

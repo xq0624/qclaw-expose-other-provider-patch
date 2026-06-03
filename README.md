@@ -7,7 +7,7 @@
 ## 功能
 
 - 自动识别 `QClaw` 安装目录
-- 默认校验目标版本为 `0.2.19`
+- 默认校验目标版本为 `0.2.24`
 - 使用等长原位补丁修改 `resources/app.asar`
 - 同时处理两类前端位点：
   - `key:"doubao",label:"火山引擎（豆包）" -> key:"other",label:"其他"`
@@ -24,14 +24,14 @@
 
 ## 适用范围
 
-- 默认面向 `QClaw 0.2.19`
+- 默认面向 `QClaw 0.2.24`
 - 保留对旧 `0.1.16 / 0.1.13` guard 特征的兼容识别
-- 已新增 `0.1.19 / 0.1.20 / 0.1.22 / 0.2.1 / 0.2.4 / 0.2.5 / 0.2.10 / 0.2.17 / 0.2.19` 的 `other guard` 特征兼容识别
+- 已新增 `0.1.19 / 0.1.20 / 0.1.22 / 0.2.1 / 0.2.4 / 0.2.5 / 0.2.10 / 0.2.17 / 0.2.19 / 0.2.24` 的 `other guard` 特征兼容识别
 - 已内嵌 `0.1.19 / 0.1.20 / 0.1.22 / 0.2.1 / 0.2.4 / 0.2.5 / 0.2.10` 的 `skillhub_install` regex 兼容修复
 - 其中 `0.1.20 / 0.1.22 / 0.2.1 / 0.2.4 / 0.2.5 / 0.2.10` 已兼容 runtime 仍为旧式 Unicode regex、schema 收敛为 `^[\\w\\-\\.]{1,128}$` 的过渡状态
 - `QClaw 0.2.1 / 0.2.4 / 0.2.5 / 0.2.10` 的 `skillhub-installer.ts` 已迁移到 `qclaw-plugin/packages/content-plugin/src`，脚本会自动识别新旧路径
-- `QClaw 0.2.4 / 0.2.5 / 0.2.10 / 0.2.17 / 0.2.19` 已确认除静态 provider 列表外，还会通过 `modelApi` 动态返回值覆盖本地下拉；主脚本现已内建该覆盖禁用修补
-- `QClaw 0.2.19` 已按 Linux.do 帖子 `https://linux.do/t/topic/1667136` 增加中转站兼容修复
+- `QClaw 0.2.4 / 0.2.5 / 0.2.10 / 0.2.17 / 0.2.19 / 0.2.24` 已确认除静态 provider 列表外，还会通过 `modelApi` 动态返回值覆盖本地下拉；主脚本现已内建该覆盖禁用修补
+- `QClaw 0.2.19 / 0.2.24` 已按 Linux.do 帖子 `https://linux.do/t/topic/1667136` 增加中转站兼容修复
 
 ## 使用方法
 
@@ -91,16 +91,17 @@
 
 - 目标位于 `Program Files` 时，正式补丁、反修补、回滚都必须使用管理员 PowerShell
 - 该补丁是替换现有槽位，不是在列表末尾新增真正的新项
-- `QClaw 0.1.19 / 0.1.20 / 0.1.22 / 0.2.1 / 0.2.4 / 0.2.5 / 0.2.10 / 0.2.17 / 0.2.19` 已启用 Electron ASAR 完整性校验；仅修改 `resources/app.asar` 而不同步完整性元数据，会导致程序无法启动
+- `QClaw 0.1.19 / 0.1.20 / 0.1.22 / 0.2.1 / 0.2.4 / 0.2.5 / 0.2.10 / 0.2.17 / 0.2.19 / 0.2.24` 已启用 Electron ASAR 完整性校验；仅修改 `resources/app.asar` 而不同步完整性元数据，会导致程序无法启动
 - 当前脚本会同步更新 ASAR 头部中的目标文件完整性记录，并回写 `QClaw.exe` 内嵌的 `ELECTRONASAR` 头部哈希
 - 对 `skillhub_install` 的 regex 修复不是外置二次脚本，而是主脚本在同一执行流内按版本/特征自动判定后顺带执行；`0.2.1 / 0.2.4 / 0.2.5 / 0.2.10` 的新路径与过渡 schema 均已纳入兼容识别
 - 对 `sharp` 的修复同样已经并入主脚本：若 `package.json` 已声明 `sharp`，但运行时 `import("sharp")` 失败，则在正式执行流里自动补装并再次校验
-- `QClaw 0.2.4 / 0.2.5 / 0.2.10 / 0.2.17 / 0.2.19` 额外存在 `modelApi` 动态 provider 覆盖；如果只做 `doubao -> other` 槽位替换，界面仍可能显示“火山引擎（豆包）”。当前主脚本已将该二阶段修补并入正式流程
-- `QClaw 0.2.19` 的 `other` 若继续保存为 `openai-completions` 且 Base URL 带 `/v1`，部分中转站可能出现空回复或请求被拒；当前脚本会将其收敛为 `anthropic-messages`、Base URL 不带 `/v1`、并补 `headers.User-Agent`
+- `QClaw 0.2.4 / 0.2.5 / 0.2.10 / 0.2.17 / 0.2.19 / 0.2.24` 额外存在 `modelApi` 动态 provider 覆盖；如果只做 `doubao -> other` 槽位替换，界面仍可能显示“火山引擎（豆包）”。当前主脚本已将该二阶段修补并入正式流程
+- `QClaw 0.2.19 / 0.2.24` 的 `other` 若继续保存为 `openai-completions` 且 Base URL 带 `/v1`，部分中转站可能出现空回复或请求被拒；当前脚本会将其收敛为 `anthropic-messages`、Base URL 不带 `/v1`、并补 `headers.User-Agent`
+- 若内置更新器卡住且日志停在 `taskkill /F /IM "QClaw.exe" /T`，可先退出 QClaw，再从 `%LOCALAPPDATA%\@guanjia-openclawelectron-updater\pending` 独立运行对应 `QClaw-Setup-*_silent.exe --updated /S --force-run`
 - `-DryRun` 在 `app.asar` 已补丁但仅剩附带热修补待做时，会返回包含 `REMOTE_OVERRIDE` / `PROVIDER_PROTOCOL` / `MODEL_CONFIG` / `SKILLHUB` / `SHARP` 的 `MODE=*FIX_ONLY`
 - 若历史上曾应用过旧版不完整补丁，重新执行正式补丁会自动进入修复模式
 - 若之前用旧版本脚本修补过，随后又升级了 `QClaw`，旧残留可能导致正式执行失败、状态异常或运行异常；此时建议先重新安装 `QClaw`（`https://qclaw.qq.com/`），再使用**管理员 PowerShell**重新运行脚本
-- 已实测 `QClaw 0.2.19`：半补丁状态为 `STATUS=PATCHED_NEEDS_PROVIDER_PROTOCOL_FIX`；正式修补后复核为 `STATUS=PATCHED_OR_OPEN`，并确认 `REMOTE_OVERRIDE_FIX=ALREADY_FIXED`、`PROVIDER_PROTOCOL_FIX=ALREADY_FIXED`、`MODEL_PROVIDER_CONFIG_FIX=ALREADY_FIXED`、`SHARP_FIX=ALREADY_OK`
+- 已实测 `QClaw 0.2.24.540`：内置更新器父子进程链导致更新中断后，独立运行 pending 安装包完成升级；补丁前为 `STATUS=UNPATCHED_PATCHABLE`，正式修补后复核为 `STATUS=PATCHED_OR_OPEN`，并确认 `REMOTE_OVERRIDE_FIX=ALREADY_FIXED`、`PROVIDER_PROTOCOL_FIX=ALREADY_FIXED`、`MODEL_PROVIDER_CONFIG_FIX=ALREADY_FIXED`、`SHARP_FIX=ALREADY_OK`
 - 软件更新后大概率需要重新评估兼容性
 - 若后续官方稳定开放 `other` provider`、修复 `skillhub_install` schema`，或内置依赖管理恢复稳定，本补丁及附带热修补应优先评估下线，必要时可直接删除相关逻辑
 - 正式写回不是原子操作，执行前请确保系统稳定并保留备份
